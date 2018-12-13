@@ -1,7 +1,3 @@
-{-# LANGUAGE NoMonomorphismRestriction #-}
-{-# LANGUAGE FlexibleContexts          #-}
-{-# LANGUAGE TypeFamilies              #-}
-
 -- | L-System generative grammar
 -- | Written by Sofia Wyetzner
 -- |
@@ -11,10 +7,8 @@
 import Data.Foldable
 import Diagrams.Prelude
 import Diagrams.Backend.SVG.CmdLine
-import Diagrams.TwoD.Path.Turtle
-
-main :: IO ()
-main = mainWith (sketch runT :: Diagram B)
+import Diagrams.TwoD.Path.Turtle.Internal
+import Control.Monad.State
 
 -- | Data class 'LSystem' with 'axiom' and 'rules' functions
 data LSystem a = LSystem {
@@ -22,41 +16,74 @@ data LSystem a = LSystem {
     rules :: a -> [a]
 }
 
--- | Show instance of 'LSystem'. Shows axiom result.
-instance (Show a) => Show (LSystem a) where
-    show (LSystem ax _) = show ax
+type Axiom = [Char]
 
--- | Basic Algae growth example.
-algae :: LSystem Char
-algae = LSystem "A" rule
-    where rule 'A' = "AB"
-          rule 'B' = "A"
+data Action = PUSH | POP | EXEC Move | NIL
+type Move = DrawState -> DrawState
 
--- | Fractal tree example. Uses constants so there is a default rule.
-fractalTree :: LSystem Char
-fractalTree = LSystem "0" rule
-    where rule '0' = "1[0]0"
-          rule '1' = "11"
-          rule  x  = [x]
+type TurtleStack = [DrawState]
 
-dragon :: LSystem Char
-dragon = LSystem "FX" rule
-    where rule 'F' = "Z"
-          rule 'X' = "FX+FY+"
-          rule 'Y' = "-FX-FY"
-          rule  x  = [x]
+type DrawState = TurtleState Double
+data LSystemState = STATE DrawState TurtleStack
 
-sierpinski :: LSystem Char
-sierpinski = LSystem "A" rule
-    where rule 'A' = "B-A-B"
-          rule 'B' = "A+B+A"
-          rule  x  = [x]
+main :: IO ()
+main = mainWith (getLSDiagram fern :: Diagram B)
 
-fern :: LSystem Char
-fern = LSystem "X" rule
-    where rule 'X' = "F+[[X]-X]-F[-FX]+X"
-          rule 'F' = "FF"
-          rule  x  = [x]
+startState :: String -> LSystemState
+startState ax = STATE (setHeading 90 startTurtle) []
+
+runLSystem :: Axiom -> (Char -> Action) -> State LSystemState DrawState
+runLSystem [] _ = do
+    (STATE dst _) <- get
+    return dst
+runLSystem (a:ax) rules = do 
+    evaluateMove (rules a)
+    runLSystem ax rules
+
+
+getLSDiagram :: [Char] -> QDiagram B V2 Double Any
+getLSDiagram x = lwL 0.2 . getTurtleDiagram . fst . 
+        runState (runLSystem x fernEvalRules) $ startState x
+
+pushTurtleStateToStack :: State LSystemState DrawState
+pushTurtleStateToStack = state $
+    \(STATE dst stk)
+        -> (dst, STATE dst (dst:stk))
+
+
+popTurtleStateFromStack :: State LSystemState DrawState
+popTurtleStateFromStack = state $
+    \(STATE dst ((TurtleState _ pos head _ _ _):stk))
+        -> ((penHop dst { heading = head, penPos = pos }), STATE (penHop dst { heading = head, penPos = pos }) stk)
+
+
+evaluateMove :: Action -> State LSystemState DrawState
+evaluateMove PUSH = pushTurtleStateToStack
+evaluateMove POP  = popTurtleStateFromStack
+evaluateMove (EXEC mov) = state $
+    \(STATE dst stk)
+        -> (mov dst, STATE (mov dst) stk)
+evaluateMove NIL = state $
+    \(STATE dst stk)
+        -> (dst, STATE dst stk)
+
+fernEvalRules :: Char -> Action
+fernEvalRules x = case x of
+    'X' -> NIL
+    'F' -> EXEC (forward 1)
+    '-' -> EXEC (left 25)
+    '+' -> EXEC (right 25)
+    '[' -> PUSH
+    ']' -> POP
+    _   -> NIL
+
+dragonEvalRules :: Char -> Action
+dragonEvalRules x = case x of
+    'F' -> EXEC (penDown >> forward 10)
+    'f' -> EXEC (penUp   >> forward 10)
+    '+' -> EXEC (penDown >> right 90)
+    '-' -> EXEC (penDown >> left 90)
+    _   -> NIL
 
 -- | Single step of rule application.
 grow :: LSystem a -> LSystem a
@@ -66,58 +93,23 @@ grow (LSystem axiom rule) = LSystem (axiom >>= rule) rule
 growN :: Int -> LSystem a -> LSystem a
 growN n x = iterate grow x !! n
 
+fernGrowRules :: LSystem Char
+fernGrowRules = LSystem "X" rule
+    where rule 'X' = "F+[[X]-X]-F[-FX]+X"
+          rule 'F' = "FF"
+          rule  x  = [x]
 
-parseDragon :: LSystem Char -> Turtle Double ()
-parseDragon = traverse_ turtle . axiom
-    where turtle :: Char -> Turtle Double ()
-          turtle x = case x of
-            'F' -> penDown >> forward 1
-            'f' -> penUp   >> forward 1
-            '+' -> penDown >> right 90
-            '-' -> penDown >> left 90
-            _   -> return ()
+dragonGrowRules :: LSystem Char
+dragonGrowRules = LSystem "FX" rule
+    where rule 'F' = "Z"
+          rule 'X' = "FX+FY+"
+          rule 'Y' = "-FX-FY"
+          rule  x  = [x]
 
-parseSierpinski :: LSystem Char -> Turtle Double ()
-parseSierpinski = traverse_ turtle . axiom
-    where turtle :: Char -> Turtle Double ()
-          turtle x = case x of
-            'A' -> penDown >> forward 1
-            'B' -> penDown >> forward 1
-            '+' -> penDown >> left 60
-            '-' -> penDown >> right 60
-            _   -> return ()
+dragon :: [Char]
+dragon = axiom $ growN 10 dragonGrowRules
 
-
-parseFern :: TurtleStack Double () -> LSystem Char -> Turtle Double ()
-parseFern stack = traverse_ turtle . axiom
-    where turtle :: Char -> Turtle Double ()
-          turtle x = case x of
-            'F' -> penDown >> forward 1
-            '-' -> penDown >> left 25
-            '+' -> penDown >> right 25
-            '[' -> push stack penDown
-            ']' -> pop stack
-
-sketch :: Turtle Double a -> QDiagram B V2 Double Any
-sketch = lwL 0.2 . stroke . sketchTurtle
-
-runT :: Turtle Double ()
-runT = parseSierpinski (growN 6 sierpinski)
-
-type TurtleStack n a = [Turtle n a]
-
-emptyStack :: TurtleStack n a
-emptyStack = []
-
-push :: TurtleStack n a -> Turtle n a -> TurtleStack n a
-push stack t = t:stack
-
-pop :: TurtleStack n a -> (TurtleStack n a, Turtle n a)
-pop stack = (tail stack, head stack)
-
-
--- TODO: The Diagrams Turtle package doesn't support stack operations so 
--- I need to write a custom Turtle renderer with Graphics
-
+fern :: [Char]
+fern = axiom $ growN 6 fernGrowRules
 
 
